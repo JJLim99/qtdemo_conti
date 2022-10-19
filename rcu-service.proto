@@ -1,0 +1,561 @@
+syntax = "proto3";
+
+package rcuservice;
+
+service AteCoreCntApi
+{
+  /* Generic Attribute Operations */
+  rpc SetAttribute (SetAttrRequest) returns (StatusResponse);
+  rpc GetAttribute (GetAttrRequest) returns (GetAttrResponse);
+
+  /* I2C Operations (Requires Attr_UTF8_RawIoAccessEnabled for internally controlled buses) */
+  rpc ExecuteI2C(I2CRequest) returns (I2CResponse);
+
+  /* GPIO Operations (Requires Attr_UTF8_RawIoAccessEnabled for internally controlled GPIOs) */
+  rpc SetGPIODirection(GPIODirectionRequest) returns (StatusResponse);
+  rpc WriteGPIO(GPIOLevelSetRequest) returns (StatusResponse);
+  rpc ReadGPIO(GPIOLevelGetRequest) returns (GPIOLevelGetResponse);
+
+  /* UART Operations (Requires Attr_UTF8_RawIoAccessEnabled) */
+  rpc WriteSerial(WriteSerialRequest) returns (StatusResponse);
+  rpc ReadSerial(ReadSerialRequest) returns (ReadSerialResponse);
+
+  /* Extra: Push Notification */
+  rpc PushNoti(stream Info) returns (stream Info);
+}
+
+/****** **************************************************************** ******/
+/****** Shared and Attribute Messages                                    ******/
+/****** **************************************************************** ******/
+message Info
+{
+  string message = 1;
+  int32 status = 2;
+}
+
+message StatusResponse
+{
+   int32 status = 1;
+   // TODO: May remove the message befor release.
+   // Adds overhead, but potentially OK since it would only
+   // be significant in error case.  But in debug mode, probably
+   // wouldn't provide much info (we would want to optimize it out)
+   string error_message = 2;
+}
+
+// 'repeated' cannot be used directly inside of 'oneof',
+// so we have to get a little creative in how this is defined
+// in order to fit arrays in a variant.
+message I32Array
+{
+  repeated int32 d = 1 [packed=true];
+}
+
+message U32Array
+{
+  repeated uint32 d = 1 [packed=true];
+}
+
+message UTF8Array
+{
+  repeated string d = 1;
+}
+
+message DBLArray
+{
+  repeated double d = 1 [packed=true];
+}
+
+message BOOLArray
+{
+  repeated bool d = 1 [packed=true];
+}
+
+// We use this one message as a base to
+// compose other messages that contain data
+// of varying type.
+message VariantData
+{
+   oneof data
+   {
+      int32  I32  = 2;
+      uint32 U32  = 3;
+      string UTF8 = 4;
+      double DBL  = 5;
+      bool   BOOL = 6;
+      I32Array I32arr = 7;
+      U32Array U32arr = 8;
+      UTF8Array UTF8arr = 9;
+      DBLArray DBLarr = 10;
+      BOOLArray BOOLarr = 11;
+   }
+}
+
+/****** Sensor Constants ******/
+
+enum HealthState
+{
+  HealthStateInvalid          = 0;
+  HealthStateNormal           = 1;
+  HealthStateUserDefined      = 2;
+  HealthStateOutOfSpec        = 3;
+  HealthStateRiskOfDamage     = 4;
+  HealthStateFaultDetected    = 5; // A fault signal was received
+  HealthStatePresentDetFailed = 6; // A presence detect signal was low, or
+                                   // configured watchdog pet was late
+}
+
+enum FanDomain
+{
+  FanDomainInvalid  = 0;
+  FanDomainIntake   = 1;
+  FanDomainExhaust  = 2;
+  FanDomainSide     = 3;
+  // TODO: Others?  Do we want "Bottom", "Top", "Rear"?
+}
+
+enum FanMode
+{
+  FanModeInvalid              = 0;
+  // <later> FanModeAuto                 = 1;  // Use predefined Auto Curve
+  FanModeHigh                 = 2;  // Maximum cooling, loud
+  // <later> FanModeSafeManual           = 3;  // Allow User manipulation above Auto curve
+  // Below modes are restricted - see Attr_BOOL_UnsafeFanModesEnabled
+  // TODO: Probably want a way to enable the watchdog version without enabling the
+  // non-watchdog version.
+  // <later> FanModeUnsafeManualWatchdog = 10; // Allows setting below Auto Curve, but
+                                        // reverts to Auto unless re-set every 10 seconds.
+  FanModeUnsafeManual         = 11; // Allows setting below Auto Curve
+}
+
+enum PepVariant
+{
+  PepVariantInvalid = 0;
+  PepVariantSinglePhase16A = 1;
+  PepVariantSinglePhase24A = 2;
+}
+
+// Attributes in the API.
+// - An "_N" suffix means the attribute is indexed.
+// - An "_IorN" suffix means the attribute can be specified with index or Resident ID
+enum Attribute // Attribute IDs
+{
+   Attr_Invalid = 0;
+
+
+  /* Fan Attributes */
+    Attr_U32_FanCount         = 500; // RO
+    Attr_UTF8_FanName_N       = 501; // RO
+    Attr_U32_FanRpm_N         = 502; // RO - see Attr_U32_FanDomainManualRpm_N to write
+    // <later> Attr_U32_FanHealthState_N = 503; // RO - from HealthState
+    Attr_U32_FanDomainIndex_N = 504; // RO - the domain for fan N, an index into Attr_U32_FanDomainXXXXXX (Unsupported at this moment)
+
+  /* Fans cannot be manipulated individually; they are divided into "domains", and
+     fan speed can only be manipulated in terms of an entire domain.
+     Fan profiles can also be set individually in manufacturing for each domain;
+     unlike PXI chassis, only one profile per domain is supported.
+    */
+    Attr_U32_FanDomainCount       = 510; // RO - the number of fan domains
+    Attr_U32_FanDomain_N          = 511; // RO - from FanDomain
+    Attr_U32_FanDomainMode_N      = 512; // R/W - from FanMode
+    Attr_U32_FanDomainManualRpm_N = 513; // R/W - Set point for the domain's fan RPM if corresponding
+                                         // FanDomainMode is set to one of the manual modes.
+    Attr_UTF8_FanDomainDisplayName_N = 514;
+    // The next six attributes are used to define the "Auto" fan profile for this
+    // domain; the slope of the relationship between RPM and Temperature.
+    // <later> Attr_DBL_FanDomainProfileHighInflectTempDegC_N = 520; // RO in normal mode.  R/W in configuration mode;
+    // <later> Attr_U32_FanDomainProfileHighInflectFanRpm_N   = 521; // RO in normal mode.  R/W in configuration mode;
+    // <later> Attr_DBL_FanDomainProfileMidInflectTempDegC_N  = 522; // RO in normal mode.  R/W in configuration mode;
+    // <later> Attr_U32_FanDomainProfileMidInflectFanRpm_N    = 523; // RO in normal mode.  R/W in configuration mode;
+    // <later> Attr_DBL_FanDomainProfileLowInflectTempDegC_N  = 524; // RO in normal mode.  R/W in configuration mode;
+    // <later> Attr_U32_FanDomainProfileLowInflectFanRpm_N    = 525; // RO in normal mode.  R/W in configuration mode;
+
+  /* Temp Sensor Attributes */
+    Attr_U32_TempCount                   = 600; // RO in normal mode.  R/W in configuration mode
+    Attr_UTF8_TempName_N                 = 601; // RO in normal mode.  R/W in configuration mode.
+    Attr_DBL_TempReadingC_N               = 602; // RO
+    // <later> Attr_DBL_TempLowerDamageRisk_N       = 603; // RO (Unsupported at this moment)
+    // <later> Attr_DBL_TempUpperDamageRisk_N       = 604; // RO (Unsupported at this moment)
+    // <later> Attr_DBL_TempLowerCritical_N         = 605; // RO (Unsupported at this moment)
+    // <later> Attr_DBL_TempUpperCritical_N         = 606; // RO (Unsupported at this moment)
+    // <later> Attr_DBL_TempLowerUser_N             = 607; // R/W (Unsupported at this moment)
+    // <later> Attr_DBL_TempUpperUser_N             = 608; // R/W (Unsupported at this moment)
+    // <later> Attr_U32_TempHealthState_N           = 609; // RO - From HealthState
+    // <later> Attr_U32_TempAlarm_N                 = 610; // R/W (Writeable to clear the Alarm)
+    // <later> Attr_U32_TempAlarmPollingInterval_N  = 611; // RO (Unsupported at this moment)
+    // <later> Attr_DBL_TempAccuracy_N              = 612; // RO (Unsupported at this moment)
+
+  /* Voltage Attributes */
+    Attr_U32_VoltCount                 = 700; // RO
+    Attr_DBL_VoltReading_N             = 701; // RO
+    Attr_UTF8_VoltName_N               = 702; // RO
+    Attr_DBL_VoltNominal_N             = 703; // RO (Unsupported at this moment)
+
+  /* Current Attributes */
+    Attr_U32_AmpCount                 = 800; // RO
+    Attr_DBL_AmpReading_N             = 801; // RO
+    Attr_UTF8_AmpName_N               = 802; // RO
+
+  /* Pep Attributes */
+    Attr_U32_PepVariant               = 900; // RO - from PepVariant
+
+  /* Resident Asset Info */
+    Attr_U32_ResidentCount   = 1000;
+    // <later> Attr_UTF8_ResidentVendor_IorN = 1001;
+    // <later> Attr_UTF8_ResidentModel_IorN  = 1002;
+    // The maximum Rack U occupied by this resident.
+    // <later> Attr_U32_ResidentPositionMax_IorN  = 1003;
+    // The minimum Rack U occupied by this resident
+    // <later> Attr_U32_ResidentPositionMin_IorN  = 1004;
+    // TODO: Are there other fields we should add to describe rack location?
+    // ResidentStatus captures detectable issues with the resident.  This could be
+    // a bad fault line value, or loss of presence detect, for example.
+    Attr_U32_ResidentHealthState = 1010;
+
+   /* Configuration Attributes */
+      // Turns on configuration mode.  This allows the API user to:
+      // - Add/Remove non-default temperature sensors
+      // - Manipulate the Fan Profile Inflection Points (SensorFanDomainProfileXXXInflectXXX)
+      // Will likely restrict this, by some combination of requiring special authentication,
+      // and/or using secret values.  Probably authentication is better, since this is
+      // an integrator function, not just an internal NI one.
+      // <later> Attr_BOOL_ConfigurationModeEnabled = 4000;
+
+   /* Internal Debugging and Diagnostics - NOT IN PUBLIC API */
+   /* Access will be protected by unique enabling requirements */
+      // Attr_UTF8_RawIoAccessEnabled
+      //    - Enables access to predefined sensors via the I2C API.
+      //    - Enables use of the Serial APIs
+      //    - Enables access to GPIO
+      // Enabled by setting to the raw sensor password (defined in header file elsewhere)
+      // Disabled by setting to an empty string
+      Attr_UTF8_RawIoAccessEnabled = 5000;
+      // Enables unsafe fan modes
+      Attr_BOOL_UnsafeFanModesEnabled  = 5001;
+
+   /* UART Attributes*/
+      // Configuration of the Serial Port Baud Rate.  Use
+      // values from BaudRate enum. Index is from SerialPort enum.
+      // Requires Attr_UTF8_RawIoAccessEnabled
+      Attr_U32_UARTBaudRate_N = 6000;
+}
+
+enum constants
+{
+  Invalid = 0;
+
+  Ndx_All_Available_Indices = -2147483648; // 0xFFFFFFFF
+}
+
+message SetAttrRequest
+{
+  uint32 attr = 1;
+  uint32 index = 2; // Setting multiple indices simultaneously is not supported.
+  VariantData value = 3;
+} // returns StatusResponse
+
+message GetAttrRequest
+{
+  uint32 attr = 1;
+  int32 index = 2; // an index of Ndx_All_Available_Indices indicates that all
+                   // indices should be retrieved.
+} // returns GetAttrResponse
+
+message GetAttrResponse
+{
+  StatusResponse status = 1;
+  VariantData value = 2;
+}
+
+/****** ************************************************************************************ ******/
+/****** I2C Messages (Requires Attr_UTF8_RawIoAccessEnabled for internally controlled buses) ******/
+/****** ************************************************************************************ ******/
+
+//For 'Write' function, need to input 'write_data' and set 'read_count' = 0
+//For 'Read' function, need to input 'read_count' only
+
+enum I2CBus
+{
+   I2CBusInvalid = 0;
+   I2CBus1 = 1;
+   I2CBus2 = 2;
+   I2CBus3 = 3;
+   I2CBus4 = 4;
+   I2CBus5 = 5;
+   I2CBus6 = 6;
+
+   // MUX
+   // To access device connect after analog MUX.
+   // Note : The I2CBus3 is remain for access device that in parallel with the analog MUX.
+   I2CBus5_MUX1_CH0 = 7;
+   I2CBus5_MUX1_CH1 = 8;
+   I2CBus5_MUX1_CH2 = 9;
+   I2CBus5_MUX1_CH3 = 10;
+
+   // The "User" Bus enums should be named according to what the user
+   // would see when physically looking at the terminals to connect the
+   // bus, so it's clear what physical thing is what API thing.
+   // These may overlap with dev bus enums, such that a dev enum and
+   // user enum actually refer to the same physical bus.
+   // TODO: Update these to reflect physical labeling.
+   I2CBusUser1 = 101;
+   I2CBusUser2 = 102;
+}
+
+// The following Request/Response pair is intended to support all
+// possible I2C operations that a client might want to execute. These
+// operations are asynchronous, and the server is intended to manage
+// session state and so forth. Rather than opening/closing each time,
+// the server will reduce overhead by keeping driver sessions to the I2C
+// master open for the server lifetime.
+
+// Note that the availability of a given port may be restricted based on
+// RCU configuration; a sensor bus polled directly by RCU monitoring code
+// would not also be exposed to arbitrary client operations.  In such a case,
+// requestStatus would return DisallowedByConfiguration.
+message I2CRequest
+{
+   I2CBus port = 1;
+   // address without the R/W bit.
+   uint32 address = 2;
+   // Note that "bytes" is poorly defined as "std::string" by gRPC, which
+   // breaks because of null terminators if you have a 0 in your data.
+   // Be sure to work with the capacity field of std::string rather than
+   // relying on the NULL terminator.
+   bytes write_data = 3;
+   uint32 read_count = 4;
+   bool is10bit_address = 5;
+}
+
+message I2CResponse
+{
+   StatusResponse status = 1;
+   // See above admonitions of "bytes" encoding to std::string.
+   bytes read_data = 2;
+}
+
+
+/****** ************************************************************************************* ******/
+/****** GPIO Messages (Requires Attr_UTF8_RawIoAccessEnabled for internally controlled GPIOs) ******/
+/****** ************************************************************************************* ******/
+
+// TODO: These should be named in a way that corresponds to what they're attached
+// to, and/or physical location on the device, if possible.
+enum GPIOPin
+{
+   GPIOPinInvalid  = 0;
+   GPIOPinMXM3_1   = 1;
+   GPIOPinMXM3_2   = 2;
+   GPIOPinMXM3_3   = 3;
+   GPIOPinMXM3_5   = 4;
+   GPIOPinMXM3_6   = 5;
+   GPIOPinMXM3_7   = 6;
+   GPIOPinMXM3_11  = 7;
+   GPIOPinMXM3_12  = 8;
+   GPIOPinMXM3_13  = 9;
+   GPIOPinMXM3_14  = 10;
+   GPIOPinMXM3_15  = 11;
+   GPIOPinMXM3_16  = 12;
+   GPIOPinMXM3_17  = 13;
+   GPIOPinMXM3_18  = 14;
+   GPIOPinMXM3_110 = 15;
+   GPIOPinMXM3_114 = 16;
+   GPIOPinMXM3_116 = 17;
+   GPIOPinMXM3_120 = 18;
+   GPIOPinMXM3_122 = 19;
+   GPIOPinMXM3_124 = 20;
+   GPIOPinMXM3_128 = 21;
+   GPIOPinMXM3_130 = 22;
+   GPIOPinMXM3_148 = 23;
+   GPIOPinMXM3_156 = 24;
+   GPIOPinMXM3_158 = 25;
+   GPIOPinMXM3_200 = 26;
+   GPIOPinMXM3_202 = 27;
+   GPIOPinMXM3_204 = 28;
+   GPIOPinMXM3_215 = 29;
+   GPIOPinMXM3_217 = 30;
+   GPIOPinMXM3_220 = 31;
+   GPIOPinMXM3_221 = 32;
+   GPIOPinMXM3_223 = 33;
+   GPIOPinMXM3_225 = 34;
+   GPIOPinMXM3_227 = 35;
+   GPIOPinMXM3_229 = 36;
+   GPIOPinMXM3_231 = 37;
+   GPIOPinMXM3_232 = 38;
+   GPIOPinMXM3_233 = 39;
+   GPIOPinMXM3_235 = 40;
+   GPIOPinMXM3_243 = 41;
+   GPIOPinMXM3_245 = 42;
+   GPIOPinMXM3_247 = 43;
+   GPIOPinMXM3_255 = 44;
+   GPIOPinMXM3_257 = 45;
+   GPIOPinMXM3_259 = 46;
+   GPIOPinMXM3_261 = 47;
+   GPIOPinMXM3_262 = 48;
+   GPIOPinMXM3_265 = 49;
+   GPIOPinMXM3_274 = 50;
+   GPIOPinMXM3_286 = 51;
+   GPIOPinMXM3_305 = 52;
+   GPIOPinMXM3_307 = 53;
+   GPIOPinMXM3_309 = 54;
+   GPIOPinMXM3_311 = 55;
+
+   // IO Expander 1: pi4ioe5v96248 on I2C5
+   GPIOPinIOXPD1_IO0_0 = 56;
+   GPIOPinIOXPD1_IO0_1 = 57;
+   GPIOPinIOXPD1_IO0_2 = 58;
+   GPIOPinIOXPD1_IO0_3 = 59;
+   GPIOPinIOXPD1_IO0_4 = 60;
+   GPIOPinIOXPD1_IO0_5 = 61;
+   GPIOPinIOXPD1_IO0_6 = 62;
+   GPIOPinIOXPD1_IO0_7 = 63;
+   GPIOPinIOXPD1_IO1_0 = 64;
+   GPIOPinIOXPD1_IO1_1 = 65;
+   GPIOPinIOXPD1_IO1_2 = 66;
+   GPIOPinIOXPD1_IO1_3 = 67;
+   GPIOPinIOXPD1_IO1_4 = 68;
+   GPIOPinIOXPD1_IO1_5 = 69;
+   GPIOPinIOXPD1_IO1_6 = 70;
+   GPIOPinIOXPD1_IO1_7 = 71;
+   GPIOPinIOXPD1_IO2_0 = 72;
+   GPIOPinIOXPD1_IO2_1 = 73;
+   GPIOPinIOXPD1_IO2_2 = 74;
+   GPIOPinIOXPD1_IO2_3 = 75;
+   GPIOPinIOXPD1_IO2_4 = 76;
+   GPIOPinIOXPD1_IO2_5 = 77;
+   GPIOPinIOXPD1_IO2_6 = 78;
+   GPIOPinIOXPD1_IO2_7 = 79;
+   GPIOPinIOXPD1_IO3_0 = 80;
+   GPIOPinIOXPD1_IO3_1 = 81;
+   GPIOPinIOXPD1_IO3_2 = 82;
+   GPIOPinIOXPD1_IO3_3 = 83;
+   GPIOPinIOXPD1_IO3_4 = 84;
+   GPIOPinIOXPD1_IO3_5 = 85;
+   GPIOPinIOXPD1_IO3_6 = 86;
+   GPIOPinIOXPD1_IO3_7 = 87;
+   GPIOPinIOXPD1_IO4_0 = 88;
+   GPIOPinIOXPD1_IO4_1 = 89;
+   GPIOPinIOXPD1_IO4_2 = 90;
+   GPIOPinIOXPD1_IO4_3 = 91;
+   GPIOPinIOXPD1_IO4_4 = 92;
+   GPIOPinIOXPD1_IO4_5 = 93;
+   GPIOPinIOXPD1_IO4_6 = 94;
+   GPIOPinIOXPD1_IO4_7 = 95;
+   GPIOPinIOXPD1_IO5_0 = 96;
+   GPIOPinIOXPD1_IO5_1 = 97;
+   GPIOPinIOXPD1_IO5_2 = 98;
+   GPIOPinIOXPD1_IO5_3 = 99;
+   GPIOPinIOXPD1_IO5_4 = 100;
+   GPIOPinIOXPD1_IO5_5 = 101;
+   GPIOPinIOXPD1_IO5_6 = 102;
+   GPIOPinIOXPD1_IO5_7 = 103;
+
+   // IO Expander 2: pca9674 on I2C3
+   GPIOPinIOXPD2_IO0_0 = 104;
+   GPIOPinIOXPD2_IO0_1 = 105;
+   GPIOPinIOXPD2_IO0_2 = 106;
+   GPIOPinIOXPD2_IO0_3 = 107;
+   GPIOPinIOXPD2_IO0_4 = 108;
+   GPIOPinIOXPD2_IO0_5 = 109;
+   GPIOPinIOXPD2_IO0_6 = 110;
+   GPIOPinIOXPD2_IO0_7 = 111;
+
+   // The "User" pin enums should be named according to what the user
+   // would see when physically looking at the lines, so it's clear
+   // what physical thing is what API thing.  These may overlap
+   // with some lines above, such that a dev enum and user enum
+   // actually refer to the same physical line.
+   // TODO: Update these to reflect physical labeling.
+   GPIOPinUser1 = 1001; // MXM3_235
+   GPIOPinUser2 = 1002; // MXM3_233
+   GPIOPinUser3 = 1003; // MXM3_231
+   GPIOPinUser4 = 1004; // MXM3_229
+}
+
+enum GPIODirection
+{
+  GPIODirInvalid = 0;
+  GPIODirInput = 1;
+  GPIODirOutput = 2;
+}
+
+enum GPIOLevel
+{
+  GPIOLevelInvalid = 0;
+  GPIOLevelHigh = 1;
+  GPIOLevelLow = 2;
+}
+
+message GPIODirectionRequest
+{
+  GPIOPin pin = 1;
+  GPIODirection direction = 2;
+} // returns StatusResponse
+
+message GPIOLevelSetRequest
+{
+  GPIOPin pin = 1;
+  GPIOLevel level = 2;
+} // returns StatusResponse
+
+message GPIOLevelGetRequest
+{
+  GPIOPin pin = 1;
+} // returns GPIOLevelGetResponse
+
+message GPIOLevelGetResponse
+{
+  StatusResponse status = 1;
+  GPIOLevel level = 2;
+}
+
+/****** **************************************************************** ******/
+/****** Serial Messages (Requires Attr_UTF8_RawIoAccessEnabled) ******/
+/****** **************************************************************** ******/
+
+enum SerialPort
+{
+   SerialPortInvalid = 0;
+   SerialPort1 = 1;
+   SerialPort2 = 2;
+   SerialPort3 = 3;
+   SerialPort4 = 4;
+}
+
+enum BaudRate
+{
+  BaudRateInvalid = 0;
+  BaudRate921600 = 921600;
+  BaudRate460800 = 460800;
+  BaudRate230400 = 230400;
+  BaudRate115200 = 115200;
+  BaudRate57600 = 57600;
+  BaudRate38400 = 38400;
+  BaudRate19200 = 19200;
+  BaudRate9600 = 9600;
+  BaudRate4800 = 4800;
+  BaudRate2400 = 2400;
+  BaudRate1200 = 1200;
+}
+
+message WriteSerialRequest
+{
+  SerialPort port = 1;
+  // Important Note: For C++, "bytes" is defined as "std::string" by gRPC. There is no 'char' type.
+  bytes write_data = 2;
+} // returns StatusResponse
+
+message ReadSerialRequest
+{
+  SerialPort port = 1;
+  uint32 byte_count = 2;
+  uint32 timeout_ms = 3;
+} // returns ReadSerialResponse
+
+message ReadSerialResponse
+{
+  StatusResponse status = 1;
+  // Important Note: For C++, "bytes" is defined as "std::string" by gRPC. There is no 'char' type.
+  // Returned data may be less than requested in timeout case.  Check status code and/or count in bytes.
+  bytes read_data = 2;
+}
